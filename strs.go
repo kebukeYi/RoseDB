@@ -136,7 +136,6 @@ func (db *RoseDB) GetDel(key []byte) ([]byte, error) {
 func (db *RoseDB) Delete(key []byte) error {
 	db.strIndex.mu.Lock()
 	defer db.strIndex.mu.Unlock()
-
 	entry := &logfile.LogEntry{Key: key, Type: logfile.TypeDelete}
 	pos, err := db.writeLogEntry(entry, String)
 	if err != nil {
@@ -151,7 +150,7 @@ func (db *RoseDB) Delete(key []byte) error {
 	_, size := logfile.EncodeEntry(entry)
 	node := &indexNode{fid: pos.fid, entrySize: size}
 	select {
-	// 为何？？？
+	// 将 '删除记录' 也删除掉！！！
 	case db.discards[String].valChan <- node:
 	default:
 		logger.Warn("send to discard chan fail")
