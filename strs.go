@@ -16,7 +16,7 @@ import (
 // Any previous time to live associated with the key is discarded on successful Set operation.
 // todo String 类型写入操作 || 触发 更新操作
 func (db *RoseDB) Set(key, value []byte) error {
-	// 上写锁
+	// 上索引级别的 写锁
 	db.strIndex.mu.Lock()
 	defer db.strIndex.mu.Unlock()
 
@@ -62,8 +62,7 @@ func (db *RoseDB) MGet(keys [][]byte) ([][]byte, error) {
 	return values, nil
 }
 
-// GetRange returns the substring of the string value stored at key,
-// determined by the offsets start and end.
+// GetRange returns the substring of the string value stored at key, determined by the offsets start and end.
 func (db *RoseDB) GetRange(key []byte, start, end int) ([]byte, error) {
 	db.strIndex.mu.RLock()
 	defer db.strIndex.mu.RUnlock()
@@ -75,6 +74,7 @@ func (db *RoseDB) GetRange(key []byte, start, end int) ([]byte, error) {
 	if len(val) == 0 {
 		return []byte{}, nil
 	}
+
 	// Negative offsets can be used in order to provide an offset starting from the end of the string.
 	// So -1 means the last character, -2 the penultimate and so forth
 	if start < 0 {
@@ -119,12 +119,15 @@ func (db *RoseDB) GetDel(key []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	// nil, false 说明没有此值; val true 说明删除成功
 	oldVal, updated := db.strIndex.idxTree.Delete(key)
+	// oldVal == idxNode := &indexNode{fid: pos.fid, offset: pos.offset, entrySize: size}
 	db.sendDiscard(oldVal, updated, String)
+	// 构建 ‘删除消息条目’ 记录
 	_, size := logfile.EncodeEntry(entry)
 	node := &indexNode{fid: pos.fid, entrySize: size}
 	select {
+	// 将 '删除记录条目' 也删除掉！！！
 	case db.discards[String].valChan <- node:
 	default:
 		logger.Warn("send to discard chan fail")
@@ -141,7 +144,7 @@ func (db *RoseDB) Delete(key []byte) error {
 	if err != nil {
 		return err
 	}
-	// deleted 为true 说明删除成功；否则返回 false
+	// deleted 为 true 说明删除成功；否则返回 false
 	// 此时 index_node 中 包含：fid、offset、entrySize、expireAt 等属性
 	index_node, deleted := db.strIndex.idxTree.Delete(key)
 	// 发送一次
@@ -150,7 +153,7 @@ func (db *RoseDB) Delete(key []byte) error {
 	_, size := logfile.EncodeEntry(entry)
 	node := &indexNode{fid: pos.fid, entrySize: size}
 	select {
-	// 将 '删除记录' 也删除掉！！！
+	// todo 将 '删除记录条目' 也删除掉！！！ 老是忘记
 	case db.discards[String].valChan <- node:
 	default:
 		logger.Warn("send to discard chan fail")
@@ -245,7 +248,7 @@ func (db *RoseDB) MSetNX(args ...[]byte) error {
 			return nil
 		}
 	}
-
+	// <int64 , struct{}>
 	var addedKeys = make(map[uint64]struct{})
 	// Set keys to their values.
 	for i := 0; i < len(args); i += 2 {
@@ -268,7 +271,7 @@ func (db *RoseDB) MSetNX(args ...[]byte) error {
 	return nil
 }
 
-// Append appends the value at the end of the old value if key already exists.
+// Append appends the value at the end of the old value if key already exists in new pos.
 // It will be similar to Set if key does not exist.
 func (db *RoseDB) Append(key, value []byte) error {
 	db.strIndex.mu.Lock()
@@ -285,6 +288,7 @@ func (db *RoseDB) Append(key, value []byte) error {
 	}
 	// write entry to log file.
 	entry := &logfile.LogEntry{Key: key, Value: value}
+	// 重新写入，理所当然
 	valuePos, err := db.writeLogEntry(entry, String)
 	if err != nil {
 		return err
@@ -391,7 +395,7 @@ func (db *RoseDB) Count() int {
 }
 
 // Scan iterates over all keys of type String and finds its value.
-// Parameter prefix will match key`s prefix, and pattern is a regular expression that also matchs the key.
+// Parameter prefix will match key`s prefix, and pattern is a regular expression that also match the key.
 // Parameter count limits the number of keys, a nil slice will be returned if count is not a positive number.
 // The returned values will be a mixed data of keys and values, like [key1, value1, key2, value2, etc...].
 func (db *RoseDB) Scan(prefix []byte, pattern string, count int) ([][]byte, error) {
@@ -402,6 +406,7 @@ func (db *RoseDB) Scan(prefix []byte, pattern string, count int) ([][]byte, erro
 	var reg *regexp.Regexp
 	if pattern != "" {
 		var err error
+		// 录入 匹配表达式
 		if reg, err = regexp.Compile(pattern); err != nil {
 			return nil, err
 		}
@@ -412,6 +417,7 @@ func (db *RoseDB) Scan(prefix []byte, pattern string, count int) ([][]byte, erro
 	if db.strIndex.idxTree == nil {
 		return nil, nil
 	}
+	// 从索引中 扫描出来 数据
 	keys := db.strIndex.idxTree.PrefixScan(prefix, count)
 	if len(keys) == 0 {
 		return nil, nil
@@ -473,7 +479,7 @@ func (db *RoseDB) Persist(key []byte) error {
 		return err
 	}
 	db.strIndex.mu.Unlock()
-
+	// 重新写入一次
 	return db.Set(key, val)
 }
 

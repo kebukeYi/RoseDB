@@ -26,8 +26,8 @@ const (
 type LogEntry struct {
 	Key       []byte
 	Value     []byte
-	ExpiredAt int64 // time.Unix
-	Type      EntryType
+	ExpiredAt int64     // time.Unix
+	Type      EntryType // deleted or expired
 }
 
 type entryHeader struct {
@@ -45,7 +45,7 @@ type entryHeader struct {
 // +-------+--------+----------+------------+-----------+-------+---------+
 // |------------------------HEADER----------------------|
 //
-//	|--------------------------crc check---------------------------|
+// |--------------------------crc check---------------------------|
 func EncodeEntry(e *LogEntry) ([]byte, int) {
 	if e == nil {
 		return nil, 0

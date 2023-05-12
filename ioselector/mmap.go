@@ -22,6 +22,7 @@ func NewMMapSelector(fName string, fsize int64) (IOSelector, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 不同 os 下的 mmap 实现
 	buf, err := mmap.Mmap(file, true, fsize)
 	if err != nil {
 		return nil, err

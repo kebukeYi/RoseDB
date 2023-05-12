@@ -58,6 +58,7 @@ func (db *RoseDB) buildStrsIndex(ent *logfile.LogEntry, pos *valuePos) {
 
 func (db *RoseDB) buildListIndex(ent *logfile.LogEntry, pos *valuePos) {
 	var listKey = ent.Key
+	// 打开 list 文件 读取记录，发现不是 元数据，那么就是 key
 	if ent.Type != logfile.TypeListMeta {
 		listKey, _ = db.decodeListKey(ent.Key)
 	}
@@ -118,6 +119,7 @@ func (db *RoseDB) buildSetsIndex(ent *logfile.LogEntry, pos *valuePos) {
 	if err := db.setIndex.murhash.Write(ent.Value); err != nil {
 		logger.Fatalf("fail to write murmur hash: %v", err)
 	}
+	//
 	sum := db.setIndex.murhash.EncodeSum128()
 	db.setIndex.murhash.Reset()
 
@@ -129,6 +131,7 @@ func (db *RoseDB) buildSetsIndex(ent *logfile.LogEntry, pos *valuePos) {
 	if ent.ExpiredAt != 0 {
 		idxNode.expiredAt = ent.ExpiredAt
 	}
+	// 此时的索引树 是
 	idxTree.Put(sum, idxNode)
 }
 
@@ -171,7 +174,7 @@ func (db *RoseDB) loadIndexFromLogFiles() error {
 	// 当前 活跃文件 的编号一定是 所有文件编号中的最大的那一个
 	iterateAndHandle := func(dataType DataType, wg *sync.WaitGroup) {
 		defer wg.Done()
-
+		// 当前数据类型的 所有文件 id 集合
 		fids := db.fidMap[dataType]
 		if len(fids) == 0 {
 			return
@@ -219,14 +222,16 @@ func (db *RoseDB) loadIndexFromLogFiles() error {
 	wg := new(sync.WaitGroup)
 	wg.Add(logFileTypeNum)
 	for i := 0; i < logFileTypeNum; i++ {
+		// 可以并发构建不同的文件索引树
 		go iterateAndHandle(DataType(i), wg)
 	}
+	// 阻塞等待
 	wg.Wait()
 	return nil
 }
 
 func (db *RoseDB) updateIndexTree(idxTree *art.AdaptiveRadixTree, ent *logfile.LogEntry, pos *valuePos, sendDiscard bool, dType DataType) error {
-	// 数据大小
+	// 数据大小，size还有可能是 null 值
 	var size = pos.entrySize
 	// 数据类型 String || List，why？
 	if dType == String || dType == List {
@@ -241,10 +246,10 @@ func (db *RoseDB) updateIndexTree(idxTree *art.AdaptiveRadixTree, ent *logfile.L
 	if ent.ExpiredAt != 0 {
 		idxNode.expiredAt = ent.ExpiredAt
 	}
-	// 构建索引，索引是原地更新
+	// 构建索引，索引可原地更新
 	// 假如存在旧值，那么 oldValue 不为空，updated 为 true；否则就是 nil false
 	oldVal, updated := idxTree.Put(ent.Key, idxNode)
-	// 旧值是否 记录抛弃？
+	// 旧值是否 记录抛弃冗余量？
 	if sendDiscard {
 		db.sendDiscard(oldVal, updated, dType)
 	}
@@ -267,6 +272,7 @@ func (db *RoseDB) getIndexNode(idxTree *art.AdaptiveRadixTree, key []byte) (*ind
 // getVal 共同函数
 func (db *RoseDB) getVal(idxTree *art.AdaptiveRadixTree, key []byte, dataType DataType) ([]byte, error) {
 	// Get index info from an adaptive radix tree in memory.
+	// 先去内存中 尝试获得数据的保存信息
 	rawValue := idxTree.Get(key)
 	if rawValue == nil {
 		return nil, ErrKeyNotFound
@@ -287,8 +293,9 @@ func (db *RoseDB) getVal(idxTree *art.AdaptiveRadixTree, key []byte, dataType Da
 	}
 
 	// In KeyOnlyMemMode, the value not in memory, so get the value from log file at the offset.
+	// 获得这个数据类型的 内存活跃文件
 	logFile := db.getActiveLogFile(dataType)
-	// 判断是否跟 在内存中的一致
+	// 判断是否跟 在内存中的一致，有可能之前的活跃文件 已经 存储 转成 非活跃文件
 	if logFile.Fid != idxNode.fid {
 		// 不一致的话，就从 非活跃文件中寻找
 		logFile = db.getArchivedLogFile(dataType, idxNode.fid)
@@ -297,7 +304,7 @@ func (db *RoseDB) getVal(idxTree *art.AdaptiveRadixTree, key []byte, dataType Da
 	if logFile == nil {
 		return nil, ErrLogFileNotFound
 	}
-
+	// 从文件中 获得数据
 	ent, _, err := logFile.ReadLogEntry(idxNode.offset)
 	if err != nil {
 		return nil, err

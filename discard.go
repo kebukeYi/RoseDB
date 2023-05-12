@@ -28,29 +28,30 @@ var ErrDiscardNoSpace = errors.New("not enough space can be allocated for the di
 // Discard 用于记录 日志文件中的总大小和丢弃大小
 // Mainly for log files compaction.
 type discard struct {
-	sync.Mutex
-	once     *sync.Once
-	valChan  chan *indexNode
-	file     ioselector.IOSelector
-	freeList []int64          // contains file offset that can be allocated 包含可分配的文件偏移量，原地置空+freeOffsetList 虽然牺牲了空间，但是优化了时间
-	location map[uint32]int64 // offset of each fid 每个fid在discard文件中的的偏移量(索引值)
+	sync.Mutex                       // 过期字典的所有操作 都加锁
+	once       *sync.Once            // 用来关闭 通道
+	valChan    chan *indexNode       // 传送数据，假如不用通道的话，那么是不是得需要一个 容器，当很多线程想add时，是不是就是得 加锁阻塞等待
+	file       ioselector.IOSelector // 过期字典的 文件映射方式
+	freeList   []int64               // contains file offset that can be allocated 包含可分配的文件偏移量，原地置空+freeOffsetList 虽然牺牲了空间，但是优化了时间
+	location   map[uint32]int64      // offset of each fid 每个fid在discard文件中的的偏移量(索引值)，因为他记录了很多 fid 文件
 }
 
 func newDiscard(path, name string, bufferSize int) (*discard, error) {
 	// log.strs.discard
 	fname := filepath.Join(path, name)
-	// 建立内存虚拟映射文件
+	// 建立内存虚拟映射文件 8KB 最多容纳682个记录
 	file, err := ioselector.NewMMapSelector(fname, discardFileSize)
 	if err != nil {
 		return nil, err
 	}
-	// 保存 可用元素首地址 数组
+	// 保存 可用元素 首地址 数组
 	var freeItemOffsetArray []int64
 	// 元素首地址
 	var itemOffset int64
 	// <fid_1,offset>,<fid_2,offset>,<fid_3,offset>
 	location := make(map[uint32]int64)
 	for {
+		// 只是每次读取 8 字节，说明什么？说明首次打开过期字典，只需这两个信息构建索引数组，后面4字节的信息，当前不需要
 		// read fid and total is enough.
 		buf := make([]byte, 8)
 		// 读取 8 字节
@@ -62,12 +63,12 @@ func newDiscard(path, name string, bufferSize int) (*discard, error) {
 		}
 		// 前 4 字节 转换为 文件ID
 		fid := binary.LittleEndian.Uint32(buf[:4])
-		// 后 4 字节 转换为 文件总大小，默认512MB
+		// 后 4 字节 转换为 fid文件总大小，默认 512MB
 		total := binary.LittleEndian.Uint32(buf[4:8])
-		// 说明没有 过期数据 进入 || 文件合并删除后，被清理掉了
+		// 说明当前offset处没有用来记录(但是下一个位移处 不见得也没有,因此继续向下遍历)
 		if fid == 0 && total == 0 {
 			// 保存起来 log.strs.discard 文件的 offset
-			// 假如是 首次初始化，那么
+			// 如果没有冗余记录，那么就将当前 offset 记录在空闲数组中，以备下次使用
 			freeItemOffsetArray = append(freeItemOffsetArray, itemOffset)
 		} else {
 			// 存在冗余数据记录，建立 <fid_* ,offset> 映射
@@ -79,13 +80,13 @@ func newDiscard(path, name string, bufferSize int) (*discard, error) {
 	}
 	// 读到文件末尾了
 	d := &discard{
-		valChan:  make(chan *indexNode, bufferSize),
-		once:     new(sync.Once),
+		valChan:  make(chan *indexNode, bufferSize), // 接收错误信息 通道 数据类型是 indexNode
+		once:     new(sync.Once),                    // 待定
 		file:     file,
 		freeList: freeItemOffsetArray,
 		location: location,
 	}
-	// 每次new一个新的过期字典，就开启一个协程来专一监听 过期消息
+	// 由于每种数据类型都 new 一个新的过期字典，因此就开启一个协程来专一监听 过期消息，总共5个协程
 	go d.listenUpdates()
 	return d, nil
 }
@@ -142,7 +143,7 @@ func (d *discard) getCCL(activeFid uint32, ratio float64) ([]uint32, error) {
 func (d *discard) listenUpdates() {
 	for {
 		select {
-		// 执行更新||删除 key 时，将 oldValue 发送到这里
+		// 执行更新 ||删除 key 时，将 oldValue 发送到这里
 		case idxNode, ok := <-d.valChan:
 			if !ok {
 				if err := d.file.Close(); err != nil {
@@ -157,11 +158,13 @@ func (d *discard) listenUpdates() {
 }
 
 func (d *discard) closeChan() {
+	// 用来关闭 通道
 	d.once.Do(func() {
 		close(d.valChan)
 	})
 }
 
+// 设置 fid 数据中的 total 字段数据
 func (d *discard) setTotal(fid uint32, totalSize uint32) {
 	d.Lock()
 	defer d.Unlock()
@@ -198,7 +201,7 @@ func (d *discard) clear(fid uint32) {
 }
 
 func (d *discard) incrDiscard(fid uint32, delta int) {
-	// delta 一般是 数据的大小长度，用于统计 冗余数据 总量
+	// delta 一般是 数据的大小长度，用于统计 冗余数据 总量大小
 	if delta > 0 {
 		d.incr(fid, delta)
 	}
@@ -210,6 +213,7 @@ func (d *discard) incrDiscard(fid uint32, delta int) {
 // +-------+--------------+----------------+  +-------+--------------+----------------+
 // 0-------4--------------8---------------12  12------16------------20----------------24
 func (d *discard) incr(fid uint32, delta int) {
+	// 直接当前 数据类型字典 上锁
 	d.Lock()
 	defer d.Unlock()
 	// 这个 fid 文件中存在了过期数据
@@ -232,7 +236,7 @@ func (d *discard) incr(fid uint32, delta int) {
 		}
 		// 原来的 字节转为 uint32
 		v := binary.LittleEndian.Uint32(buf)
-		// 旧的 + 新的 大小
+		// 小端: 旧的 + 新的 大小
 		binary.LittleEndian.PutUint32(buf, v+uint32(delta))
 	} else {
 		// clear() 操作
@@ -249,8 +253,8 @@ func (d *discard) incr(fid uint32, delta int) {
 	}
 }
 
-// must hold the lock before invoking
-// 在 discard 文件中，分配一个位置，用来统计记录当前fid文件中的冗余数据量
+// must hold the lock before invoking 再被调用前 必须加锁
+// 在 discard 文件中，分配一个记录位置，用来统计记录当前 fid 文件中的冗余数据量
 func (d *discard) alloc(fid uint32) (int64, error) {
 	// 判断是否存在 登记过 这个文件
 	// 存在的话，返回这个 文件所在的过期字典中的 offset
@@ -263,11 +267,11 @@ func (d *discard) alloc(fid uint32) (int64, error) {
 		// 当前文件中的元素，填充完毕了，怎么办？
 		return 0, ErrDiscardNoSpace
 	}
-	// 需要登记 location[fid] && 存在空余元素位置 len(d.freeList) != 0
+	// 需要新登记 location[fid] && 存在空余元素位置 len(d.freeList) != 0
 	// 获得空闲列表中的最后一个元素所代表的位置
 	offset := d.freeList[len(d.freeList)-1]
 	// 从空闲列表中，拿去一个空闲元素，-1
-	d.freeList = d.freeList[:len(d.freeList)-1]
+	d.freeList = d.freeList[0 : len(d.freeList)-1]
 	// 建立 fid 文件 location[fid]
 	d.location[fid] = offset
 	return offset, nil

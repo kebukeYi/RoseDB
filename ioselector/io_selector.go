@@ -42,13 +42,14 @@ func openFile(fName string, fsize int64) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	// 文件状态信息
 	stat, err := fd.Stat()
 	if err != nil {
 		return nil, err
 	}
-
+	// 小于要求的文件大小
 	if stat.Size() < fsize {
+		// changes the size of the file
 		if err := fd.Truncate(fsize); err != nil {
 			return nil, err
 		}

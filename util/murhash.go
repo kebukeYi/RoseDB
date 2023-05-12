@@ -24,7 +24,7 @@ func (m *Murmur128) Write(p []byte) error {
 }
 
 func (m *Murmur128) EncodeSum128() []byte {
-	// 创建 byte 数组 大小
+	// 创建 byte 数组 大小 20 字节
 	buf := make([]byte, binary.MaxVarintLen64*2)
 	//
 	s1, s2 := m.mur.Sum128()

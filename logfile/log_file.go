@@ -78,10 +78,10 @@ const (
 
 // LogFile is an abstraction of a disk file, entry`s read and write will go through it.
 type LogFile struct {
-	sync.RWMutex
-	Fid        uint32
-	WriteAt    int64
-	IoSelector ioselector.IOSelector
+	sync.RWMutex // 不同数据类型的日志数据文件-读写锁
+	Fid          uint32
+	WriteAt      int64
+	IoSelector   ioselector.IOSelector
 }
 
 // OpenLogFile open an existing or create a new log file.
@@ -94,14 +94,16 @@ func OpenLogFile(path string, fid uint32, fsize int64, ftype FileType, ioType IO
 	if err != nil {
 		return nil, err
 	}
-	// 这是啥？
+	// 数据写入器
 	var selector ioselector.IOSelector
 	switch ioType {
 	case FileIO:
+		// linux 系统下的 打开文件，是把文件全部加载到内存中，还是只是找到文件系统中的 iNode 节点，来返回信息呢？
 		if selector, err = ioselector.NewFileIOSelector(fileName, fsize); err != nil {
 			return
 		}
 	case MMap:
+		// // linux 系统下的 mmap 文件，开辟一块内存来映射文件空间，
 		if selector, err = ioselector.NewMMapSelector(fileName, fsize); err != nil {
 			return
 		}
@@ -114,7 +116,7 @@ func OpenLogFile(path string, fid uint32, fsize int64, ftype FileType, ioType IO
 
 // ReadLogEntry read a LogEntry from log file at offset.
 // It returns a LogEntry, entry size and an error, if any.
-// If offset is invalid, the err is io.EOF.
+// If offset is invalid, the error is io.EOF.
 func (lf *LogFile) ReadLogEntry(offset int64) (*LogEntry, int64, error) {
 	// read entry header.
 	headerBuf, err := lf.readBytes(offset, MaxHeaderSize)
@@ -137,6 +139,7 @@ func (lf *LogFile) ReadLogEntry(offset int64) (*LogEntry, int64, error) {
 
 	// read entry key and value.
 	if kSize > 0 || vSize > 0 {
+		// buf []byte 返回的是字节数组
 		kvBuf, err := lf.readBytes(offset+size, kSize+vSize)
 		if err != nil {
 			return nil, 0, err

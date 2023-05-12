@@ -57,13 +57,13 @@ const (
 type (
 	// RoseDB a db instance. 作为一个数据库，提供给外界的接口 API ，简单的例如 增删改查
 	RoseDB struct {
-		//每个数据类型都有 对应的 活跃文件 头指针
+		//每个数据类型都有 对应的 活跃文件 单个 头指针 < DataType,*LogFile>
 		activeLogFiles map[DataType]*logfile.LogFile
-		//每个数据类型都有 对应的非活跃(磁盘)文件头指针
+		//每个数据类型都有 对应的非活跃(磁盘)文件数组 < DataType,<uint32,*LogFile> >
 		archivedLogFiles map[DataType]archivedFiles
-		//仅在启动时使用，即使日志文件更改也不会更新，Fid map
+		//仅在启动时使用，即使日志文件更改也不会更新，Fid map < DataType ,[uint32] >
 		fidMap map[DataType][]uint32 // only used at startup, never update even though log files changed.
-		//记录冗余数据的文件
+		//记录冗余数据的文件 < DataType,*discard >
 		discards map[DataType]*discard // 多个类型的过期字典
 
 		opts      Options              // 参数
@@ -72,10 +72,10 @@ type (
 		hashIndex *hashIndex           // Hash indexes.
 		setIndex  *setIndex            // Set indexes.
 		zsetIndex *zsetIndex           // Sorted set indexes.
-		mu        sync.RWMutex         // 读写锁
-		fileLock  *flock.FileLockGuard // 文件锁
+		mu        sync.RWMutex         // 数据库粒度-读写锁
+		fileLock  *flock.FileLockGuard // 数据库粒度-文件锁
 		closed    uint32               // 是否关闭
-		gcState   int32                // gc 标志
+		gcState   int32                // gc 标志  1  0
 	}
 
 	// 活跃文件 数组
@@ -90,40 +90,40 @@ type (
 
 	// 字符串 索引
 	strIndex struct {
-		mu      *sync.RWMutex          // 读写锁
+		mu      *sync.RWMutex          // 索引粒度-读写锁
 		idxTree *art.AdaptiveRadixTree // 自适应基数树
 	}
 
-	// 索引节点 String || List
+	// 内存中索引类型的结构  String || List
 	indexNode struct {
-		value     []byte // 字节数组值
-		fid       uint32 // 所在文件id
+		value     []byte // 字节数组，根据配置 可有可无
+		fid       uint32 // 所在文件 id
 		offset    int64  // 所在文件中的位移量
 		entrySize int    // 实际数据结构大小
 		expiredAt int64  // 存活时间
 	}
 
-	// list 结构 索引
+	// list 结构 索引 key value1 value2 value3 value4
 	listIndex struct {
 		mu    *sync.RWMutex                     // 读写锁
 		trees map[string]*art.AdaptiveRadixTree // [key][value1,value2,value3,value4]，将之前的value类型从map换成了tree，有什么提升点?
 		// go 中的 map 底层实现原理是 hash 结构，并使用链地址法解决 hash 冲突，key相同就走覆盖，key不同就是冲突，tree 相比 普通的链表，是否有了短暂提升？
 	}
 
-	// hash 结构 索引
+	// hash 结构 索引 key filed1 value1 filed2 value2 filed3 value3 filed4 value4
 	hashIndex struct {
 		mu    *sync.RWMutex
 		trees map[string]*art.AdaptiveRadixTree
 	}
 
-	// set 结构 索引
+	// set 结构 索引 key value1 value2 value3 value4 无重复，怎么达到？使用hash
 	setIndex struct {
 		mu      *sync.RWMutex
 		murhash *util.Murmur128 // hash 函数
 		trees   map[string]*art.AdaptiveRadixTree
 	}
 
-	// 有序 set 数据结构
+	// 有序 set 数据结构 key value1 value2 value3 value4 怎么保证有序时，还无重复
 	zsetIndex struct {
 		mu      *sync.RWMutex
 		indexes *zset.SortedSet
@@ -172,6 +172,7 @@ func Open(opts Options) (*RoseDB, error) {
 
 	// acquire file lock to prevent multiple processes from accessing the same directory.
 	lockPath := filepath.Join(opts.DBPath, lockFileName)
+	// 尝试获得文件锁
 	lockGuard, err := flock.AcquireFileLock(lockPath, false)
 	if err != nil {
 		return nil, err
@@ -189,17 +190,18 @@ func Open(opts Options) (*RoseDB, error) {
 		zsetIndex:        newZSetIdx(),
 	}
 
-	// init discard file. 用来记录每个数据文件中 冗余数据量
+	// 目的是用来记录每个数据文件中 冗余数据量
+	// init discard file. 初始化各个数据类型的 过期字典，假如存在的话，就打开
 	if err := db.initDiscard(); err != nil {
 		return nil, err
 	}
 
-	// load the log files from disk. 加载每个文件的句柄到内存中
+	// load the log files from disk. 加载每个类型的所有文件的句柄到内存中
 	if err := db.loadLogFiles(); err != nil {
 		return nil, err
 	}
 
-	// load indexes from log files.
+	// load indexes from log files. 构建索引
 	if err := db.loadIndexFromLogFiles(); err != nil {
 		return nil, err
 	}
@@ -318,7 +320,7 @@ func (db *RoseDB) writeLogEntry(ent *logfile.LogEntry, dataType DataType) (*valu
 	if err := db.initLogFile(dataType); err != nil {
 		return nil, err
 	}
-	// 获得 打开的文件句柄 || mmap 映射的内存地址区间
+	// 获得 活跃文件 句柄 || mmap 映射的内存地址区间
 	activeLogFile := db.getActiveLogFile(dataType)
 	if activeLogFile == nil {
 		return nil, ErrLogFileNotFound
@@ -350,6 +352,7 @@ func (db *RoseDB) writeLogEntry(ent *logfile.LogEntry, dataType DataType) (*valu
 		ftype, iotype := logfile.FileType(dataType), logfile.IOType(opts.IoType)
 		// 重新打开 创建文件
 		lf, err := logfile.OpenLogFile(opts.DBPath, activeFileId+1, opts.LogFileSizeThreshold, ftype, iotype)
+		// 打开文件报错，记得释放锁，返回错误
 		if err != nil {
 			db.mu.Unlock()
 			return nil, err
@@ -357,11 +360,11 @@ func (db *RoseDB) writeLogEntry(ent *logfile.LogEntry, dataType DataType) (*valu
 
 		// 每次新建文件时，初始化一次过期字典（注意：什么时机去进行文件合并的）
 		db.discards[dataType].setTotal(lf.Fid, uint32(opts.LogFileSizeThreshold))
-		// 更新赋值
+		// 更新新活跃文件
 		db.activeLogFiles[dataType] = lf
 		activeLogFile = lf
 		db.mu.Unlock()
-	}
+	} // 文件大小不够 创建新文件 over
 
 	// 取地址 原子加载？
 	writeAt := atomic.LoadInt64(&activeLogFile.WriteAt)
@@ -375,10 +378,11 @@ func (db *RoseDB) writeLogEntry(ent *logfile.LogEntry, dataType DataType) (*valu
 			return nil, err
 		}
 	}
+	// 写完后，返回一个 记录数据的完整信息，没有大小？？？
 	return &valuePos{fid: activeLogFile.Fid, offset: writeAt}, nil
 }
 
-// 加载文件到内存中，恢复当时内存结构使用
+// 加载数据文件到内存中，恢复 活跃文件 非活跃文件 使用
 func (db *RoseDB) loadLogFiles() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -405,7 +409,7 @@ func (db *RoseDB) loadLogFiles() error {
 	}
 
 	db.fidMap = fidMap
-
+	// 遍历 不同的数据类型 下的 多个文件
 	for dataType, fids := range fidMap {
 		if db.archivedLogFiles[dataType] == nil {
 			db.archivedLogFiles[dataType] = make(archivedFiles)
@@ -413,7 +417,7 @@ func (db *RoseDB) loadLogFiles() error {
 		if len(fids) == 0 {
 			continue
 		}
-		// load log file in order.
+		// load log file in order. 对磁盘中的 不同数据类型的文件进行排序
 		sort.Slice(fids, func(i, j int) bool {
 			return fids[i] < fids[j]
 		})
@@ -421,7 +425,7 @@ func (db *RoseDB) loadLogFiles() error {
 		opts := db.opts
 		for i, fid := range fids {
 			ftype, iotype := logfile.FileType(dataType), logfile.IOType(opts.IoType)
-			// 只是打开文件
+			// 只是打开文件 或者 mmap 映射文件 来获得文件fd 文件buf 文件大小
 			logFile, err := logfile.OpenLogFile(opts.DBPath, fid, opts.LogFileSizeThreshold, ftype, iotype)
 			if err != nil {
 				return err
@@ -432,7 +436,7 @@ func (db *RoseDB) loadLogFiles() error {
 				// 每个类型的最大 FID 作为这个类型的 活跃日志文件
 				db.activeLogFiles[dataType] = logFile
 			} else {
-				// 其他文件则作为 数组 保存起来，未必有序。
+				// 其他文件则作为 数组 保存起来
 				db.archivedLogFiles[dataType][fid] = logFile
 			}
 		}
@@ -441,7 +445,7 @@ func (db *RoseDB) loadLogFiles() error {
 }
 
 func (db *RoseDB) initLogFile(dataType DataType) error {
-	db.mu.Lock()
+	db.mu.Lock() // 数据库层面的锁
 	defer db.mu.Unlock()
 	// 已经初始化完毕了，直接返回
 	if db.activeLogFiles[dataType] != nil {
@@ -466,13 +470,15 @@ func (db *RoseDB) initLogFile(dataType DataType) error {
 // 初始化 过期字典
 func (db *RoseDB) initDiscard() error {
 	discardPath := filepath.Join(db.opts.DBPath, discardFilePath)
+	// 不存在就 新建
 	if !util.PathExist(discardPath) {
 		if err := os.MkdirAll(discardPath, os.ModePerm); err != nil {
 			return err
 		}
 	}
-
+	// 新建 动态空间 <DataType , discard>
 	discards := make(map[DataType]*discard)
+	// 不同的数据类型 拥有 不同的 过期字典文件 5种文件
 	for i := String; i < logFileTypeNum; i++ {
 		// log.strs.discard 不同类型的文件等等
 		name := logfile.FileNamesMap[logfile.FileType(i)] + discardFileName
@@ -482,6 +488,7 @@ func (db *RoseDB) initDiscard() error {
 		}
 		discards[i] = dis
 	}
+	// 数据库层面的 过期字典
 	db.discards = discards
 	return nil
 }
@@ -536,10 +543,11 @@ func (db *RoseDB) handleLogFileGC() {
 	if db.opts.LogFileGCInterval <= 0 {
 		return
 	}
-
+	// 创建信号
 	quitSig := make(chan os.Signal, 1)
 	signal.Notify(quitSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	// 周期性
+
+	// 周期器
 	ticker := time.NewTicker(db.opts.LogFileGCInterval)
 
 	defer ticker.Stop()
@@ -552,6 +560,7 @@ func (db *RoseDB) handleLogFileGC() {
 				break
 			}
 			for dType := String; dType < logFileTypeNum; dType++ {
+				// 每个类型 开一个 GC 协程去做
 				go func(dataType DataType) {
 					// 文件合并GC
 					err := db.doRunGC(dataType, -1, db.opts.LogFileGCRatio)
@@ -560,6 +569,7 @@ func (db *RoseDB) handleLogFileGC() {
 					}
 				}(dType)
 			}
+		// 这是啥？？？
 		case <-quitSig:
 			return
 		}
