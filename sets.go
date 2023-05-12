@@ -22,17 +22,19 @@ func (db *RoseDB) SAdd(key []byte, members ...[]byte) error {
 		if len(mem) == 0 {
 			continue
 		}
+		// 目的是生成 hash 值
 		if err := db.setIndex.murhash.Write(mem); err != nil {
 			return err
 		}
 		sum := db.setIndex.murhash.EncodeSum128()
 		db.setIndex.murhash.Reset()
-
+		// 没有进行过度包装
 		ent := &logfile.LogEntry{Key: key, Value: mem}
 		valuePos, err := db.writeLogEntry(ent, Set)
 		if err != nil {
 			return err
 		}
+		// hash 值 具体value值
 		entry := &logfile.LogEntry{Key: sum, Value: mem}
 		_, size := logfile.EncodeEntry(ent)
 		valuePos.entrySize = size
@@ -66,7 +68,9 @@ func (db *RoseDB) SPop(key []byte, count uint) ([][]byte, error) {
 		}
 		values = append(values, val)
 	}
+
 	for _, val := range values {
+		// 仅仅是 删除作用
 		if err := db.sremInternal(key, val); err != nil {
 			return nil, err
 		}
@@ -156,6 +160,7 @@ func (db *RoseDB) SDiff(keys ...[]byte) ([][]byte, error) {
 			}
 		}
 	}
+
 	if len(successiveSet) == 0 {
 		return firstSet, nil
 	}
@@ -262,6 +267,7 @@ func (db *RoseDB) sMembers(key []byte) ([][]byte, error) {
 	}
 
 	var values [][]byte
+	// 获得内存树
 	idxTree := db.setIndex.trees[string(key)]
 	iterator := idxTree.Iterator()
 	for iterator.HasNext() {
@@ -269,6 +275,7 @@ func (db *RoseDB) sMembers(key []byte) ([][]byte, error) {
 		if node == nil {
 			continue
 		}
+		// key 是 sum
 		val, err := db.getVal(idxTree, node.Key(), Set)
 		if err != nil {
 			return nil, err
@@ -279,6 +286,7 @@ func (db *RoseDB) sMembers(key []byte) ([][]byte, error) {
 }
 
 // SInter returns the members of the set resulting from the inter of all the given sets.
+// 返回给定所有集合的交集
 func (db *RoseDB) SInter(keys ...[]byte) ([][]byte, error) {
 	db.setIndex.mu.RLock()
 	defer db.setIndex.mu.RUnlock()
@@ -298,8 +306,11 @@ func (db *RoseDB) SInter(keys ...[]byte) ([][]byte, error) {
 			return nil, err
 		}
 		for _, val := range values {
+			// 统计所有key下的所有value的hash值
 			h := util.MemHash(val)
 			set[h]++
+			// 这啥意思啊？
+			// 意思是 所有的 key 大家都存在的话，那就保留
 			if set[h] == num {
 				interSet = append(interSet, val)
 			}
@@ -311,10 +322,12 @@ func (db *RoseDB) SInter(keys ...[]byte) ([][]byte, error) {
 // SInterStore Store the inter result in first param
 func (db *RoseDB) SInterStore(keys ...[]byte) (int, error) {
 	destination := keys[0]
+	// 二维数组
 	inter, err := db.SInter(keys[1:]...)
 	if err != nil {
 		return -1, err
 	}
+	// 将 inter 存在 destination 中
 	if err := db.sStore(destination, inter); err != nil {
 		return -1, err
 	}
@@ -325,6 +338,7 @@ func (db *RoseDB) SInterStore(keys ...[]byte) (int, error) {
 // sStore is called in SInterStore SUnionStore SDiffStore
 func (db *RoseDB) sStore(destination []byte, vals [][]byte) error {
 	for _, val := range vals {
+		// 判断 val 是否在 destination 中
 		if isMember := db.SIsMember(destination, val); !isMember {
 			if err := db.SAdd(destination, val); err != nil {
 				return err
