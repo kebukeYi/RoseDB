@@ -37,15 +37,16 @@ func (db *RoseDB) HSet(key []byte, args ...[]byte) error {
 	for i := 0; i < len(args); i += 2 {
 		field, value := args[i], args[i+1]
 		hashKey := db.encodeKey(key, field)
+		// 保存 包装key 到文件中
 		entry := &logfile.LogEntry{Key: hashKey, Value: value}
 		valuePos, err := db.writeLogEntry(entry, Hash)
 		if err != nil {
 			return err
 		}
-
 		ent := &logfile.LogEntry{Key: field, Value: value}
 		_, size := logfile.EncodeEntry(entry)
 		valuePos.entrySize = size
+		// 内存中的是 field
 		err = db.updateIndexTree(idxTree, ent, valuePos, true, Hash)
 		if err != nil {
 			return err
@@ -100,7 +101,6 @@ func (db *RoseDB) HGet(key, field []byte) ([]byte, error) {
 		return nil, nil
 	}
 	idxTree := db.hashIndex.trees[string(key)]
-	//
 	val, err := db.getVal(idxTree, field, Hash)
 	if err == ErrKeyNotFound {
 		return nil, nil
@@ -373,7 +373,7 @@ func (db *RoseDB) HIncrBy(key, field []byte, incr int64) (int64, error) {
 		return 0, ErrIntegerOverflow
 	}
 
-	valInt64 += incr
+	valInt64 = valInt64 + incr
 	val = []byte(strconv.FormatInt(valInt64, 10))
 
 	hashKey := db.encodeKey(key, field)
