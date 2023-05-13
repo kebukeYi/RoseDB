@@ -23,6 +23,7 @@ func (db *RoseDB) ZAdd(key []byte, score float64, member []byte) error {
 	idxTree := db.zsetIndex.trees[string(key)]
 
 	scoreBuf := []byte(util.Float64ToStr(score))
+	// 包装key : 实际key 成绩  写入文件中
 	zsetKey := db.encodeKey(key, scoreBuf)
 	entry := &logfile.LogEntry{Key: zsetKey, Value: member}
 	pos, err := db.writeLogEntry(entry, ZSet)
@@ -32,10 +33,12 @@ func (db *RoseDB) ZAdd(key []byte, score float64, member []byte) error {
 
 	_, size := logfile.EncodeEntry(entry)
 	pos.entrySize = size
+	// hash值 和 实际value 写入到内存中
 	ent := &logfile.LogEntry{Key: sum, Value: member}
 	if err := db.updateIndexTree(idxTree, ent, pos, true, ZSet); err != nil {
 		return err
 	}
+	//
 	db.zsetIndex.indexes.ZAdd(string(key), score, string(sum))
 	return nil
 }
