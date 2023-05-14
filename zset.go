@@ -38,7 +38,7 @@ func (db *RoseDB) ZAdd(key []byte, score float64, member []byte) error {
 	if err := db.updateIndexTree(idxTree, ent, pos, true, ZSet); err != nil {
 		return err
 	}
-	//
+	// 核心方法
 	db.zsetIndex.indexes.ZAdd(string(key), score, string(sum))
 	return nil
 }
@@ -53,6 +53,7 @@ func (db *RoseDB) ZScore(key, member []byte) (ok bool, score float64) {
 	}
 	sum := db.zsetIndex.murhash.EncodeSum128()
 	db.zsetIndex.murhash.Reset()
+	//
 	return db.zsetIndex.indexes.ZScore(string(key), string(sum))
 }
 
@@ -67,7 +68,7 @@ func (db *RoseDB) ZRem(key, member []byte) error {
 	}
 	sum := db.zsetIndex.murhash.EncodeSum128()
 	db.zsetIndex.murhash.Reset()
-
+	// hash表 跳表中都执行删除
 	ok := db.zsetIndex.indexes.ZRem(string(key), string(sum))
 	if !ok {
 		return nil
@@ -85,7 +86,6 @@ func (db *RoseDB) ZRem(key, member []byte) error {
 	if err != nil {
 		return err
 	}
-
 	// The deleted entry itself is also invalid.
 	_, size := logfile.EncodeEntry(entry)
 	node := &indexNode{fid: pos.fid, entrySize: size}
@@ -101,10 +101,13 @@ func (db *RoseDB) ZRem(key, member []byte) error {
 func (db *RoseDB) ZCard(key []byte) int {
 	db.zsetIndex.mu.RLock()
 	defer db.zsetIndex.mu.RUnlock()
+	// 返回元素数量
 	return db.zsetIndex.indexes.ZCard(string(key))
 }
 
 // ZRange returns the specified range of elements in the sorted set stored at key.
+// 下标参数 start 和 stop 都以 0 为底，也就是说，以 0 表示有序集第一个成员，以 1 表示有序集第二个成员，以此类推。
+// 也可以使用负数下标，以 -1 表示最后一个成员， -2 表示倒数第二个成员，以此类推。
 func (db *RoseDB) ZRange(key []byte, start, stop int) ([][]byte, error) {
 	return db.zRangeInternal(key, start, stop, false)
 }
@@ -117,6 +120,7 @@ func (db *RoseDB) ZRevRange(key []byte, start, stop int) ([][]byte, error) {
 
 // ZRank returns the rank of member in the sorted set stored at key, with the scores ordered from low to high.
 // The rank (or index) is 0-based, which means that the member with the lowest score has rank 0.
+// 返回有序集中指定成员的排名。其中有序集成员按分数值递增(从小到大)顺序排列
 func (db *RoseDB) ZRank(key []byte, member []byte) (ok bool, rank int) {
 	return db.zRankInternal(key, member, false)
 }
@@ -138,10 +142,13 @@ func (db *RoseDB) zRangeInternal(key []byte, start, stop int, rev bool) ([][]byt
 	var res [][]byte
 	var values []interface{}
 	if rev {
+		//
 		values = db.zsetIndex.indexes.ZRevRange(string(key), start, stop)
 	} else {
+		//
 		values = db.zsetIndex.indexes.ZRange(string(key), start, stop)
 	}
+
 	for _, val := range values {
 		v, _ := val.(string)
 		if val, err := db.getVal(idxTree, []byte(v), ZSet); err != nil {
@@ -160,6 +167,7 @@ func (db *RoseDB) zRankInternal(key []byte, member []byte, rev bool) (ok bool, r
 		return
 	}
 
+	// member 转为 sum hash值
 	if err := db.zsetIndex.murhash.Write(member); err != nil {
 		return
 	}
@@ -170,6 +178,7 @@ func (db *RoseDB) zRankInternal(key []byte, member []byte, rev bool) (ok bool, r
 	if rev {
 		result = db.zsetIndex.indexes.ZRevRank(string(key), string(sum))
 	} else {
+		// 返回当前元素的 排名
 		result = db.zsetIndex.indexes.ZRank(string(key), string(sum))
 	}
 	if result != -1 {

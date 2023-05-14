@@ -27,7 +27,7 @@ type (
 	// SortedSetNode node of sorted set
 	SortedSetNode struct {
 		// <member , sklNode>
-		dict map[string]*sklNode // map[member][sklNode] ，hash表 映射的是 score 跳表中的节点
+		dict map[string]*sklNode // <hash(member) , sklNode> hash表 映射的是 score 跳表中的节点
 		skl  *skipList           // 头尾节点 目的是: ZRANGE key start stop 通过索引区间返回有序集合指定区间内的成员
 	}
 
@@ -89,6 +89,7 @@ func (z *SortedSet) ZAdd(key string, score float64, member string) {
 	}
 	// 大表中存在这个 key
 	sortedSetNode := z.record[key]
+	// 此时 member 是经过 hash 处理过的
 	// 判断这个 key 下的 一些变量成员是否存在(先在内存中的hash表中进行判断)
 	dictNode, exist := sortedSetNode.dict[member]
 
@@ -149,10 +150,9 @@ func (z *SortedSet) ZRank(key, member string) int64 {
 	if !exist {
 		return -1
 	}
-
+	// 以防 score 出现重复的
 	rank := z.record[key].skl.sklGetRank(v.score, member)
 	rank--
-
 	return rank
 }
 
@@ -183,7 +183,6 @@ func (z *SortedSet) ZIncrBy(key string, increment float64, member string) float6
 			increment += node.score
 		}
 	}
-
 	z.ZAdd(key, increment, member)
 	return increment
 }
@@ -193,6 +192,7 @@ func (z *SortedSet) ZRange(key string, start, stop int) []interface{} {
 	if !z.exist(key) {
 		return nil
 	}
+	//
 	return z.findRange(key, int64(start), int64(stop), false, false)
 }
 
@@ -212,7 +212,6 @@ func (z *SortedSet) ZRevRange(key string, start, stop int) []interface{} {
 	if !z.exist(key) {
 		return nil
 	}
-
 	return z.findRange(key, int64(start), int64(stop), true, false)
 }
 
@@ -276,6 +275,7 @@ func (z *SortedSet) ZScoreRange(key string, min, max float64) (val []interface{}
 	}
 
 	item := z.record[key].skl
+	// 头节点所指向的是最小的数值
 	minScore := item.head.level[0].forward.score
 	if min < minScore {
 		min = minScore
@@ -361,7 +361,6 @@ func (z *SortedSet) exist(key string) bool {
 }
 
 func (z *SortedSet) getByRank(key string, rank int64, reverse bool) (string, float64) {
-
 	skl := z.record[key].skl
 	if rank < 0 || rank > skl.length {
 		return "", math.MinInt64
@@ -386,19 +385,20 @@ func (z *SortedSet) getByRank(key string, rank int64, reverse bool) (string, flo
 	return node.member, node.score
 }
 
+// 成员的位置按分数值递增(从小到大)来排序，start stop 表示 有序集合中的位置
 func (z *SortedSet) findRange(key string, start, stop int64, reverse bool, withScores bool) (val []interface{}) {
 	skl := z.record[key].skl
 	length := skl.length
 
 	if start < 0 {
-		start += length
+		start = start + length
 		if start < 0 {
 			start = 0
 		}
 	}
 
 	if stop < 0 {
-		stop += length
+		stop = stop + length
 	}
 
 	if start > stop || start >= length {
@@ -408,15 +408,17 @@ func (z *SortedSet) findRange(key string, start, stop int64, reverse bool, withS
 	if stop >= length {
 		stop = length - 1
 	}
+	// 需要返回的元素个数
 	span := (stop - start) + 1
 
 	var node *sklNode
-	if reverse {
+	if reverse { // 逆序
 		node = skl.tail
 		if start > 0 {
+			// 从头开始寻找 排在 (length - start)位置的元素
 			node = skl.sklGetElementByRank(uint64(length - start))
 		}
-	} else {
+	} else { // 递增
 		node = skl.head.level[0].forward
 		if start > 0 {
 			node = skl.sklGetElementByRank(uint64(start + 1))
@@ -436,7 +438,6 @@ func (z *SortedSet) findRange(key string, start, stop int64, reverse bool, withS
 			node = node.level[0].forward
 		}
 	}
-
 	return
 }
 
@@ -614,15 +615,12 @@ func (skl *skipList) sklDelete(score float64, member string) {
 }
 
 func (skl *skipList) sklGetRank(score float64, member string) int64 {
-	var rank uint64 = 0
+	var rank uint64 = 0 // 走过的路程
 	p := skl.head
 
 	for i := skl.level - 1; i >= 0; i-- {
-		for p.level[i].forward != nil &&
-			(p.level[i].forward.score < score ||
-				(p.level[i].forward.score == score && p.level[i].forward.member <= member)) {
-
-			rank += p.level[i].span
+		for p.level[i].forward != nil && (p.level[i].forward.score < score || (p.level[i].forward.score == score && p.level[i].forward.member <= member)) {
+			rank = rank + p.level[i].span
 			p = p.level[i].forward
 		}
 		if p.member == member {
@@ -633,7 +631,7 @@ func (skl *skipList) sklGetRank(score float64, member string) int64 {
 }
 
 func (skl *skipList) sklGetElementByRank(rank uint64) *sklNode {
-	var traversed uint64 = 0
+	var traversed uint64 = 0 // 垂直下 总共走过的路程
 	p := skl.head
 	for i := skl.level - 1; i >= 0; i-- {
 		for p.level[i].forward != nil && (traversed+p.level[i].span) <= rank {
