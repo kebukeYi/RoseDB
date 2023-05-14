@@ -119,7 +119,7 @@ func (db *RoseDB) buildSetsIndex(ent *logfile.LogEntry, pos *valuePos) {
 	if err := db.setIndex.murhash.Write(ent.Value); err != nil {
 		logger.Fatalf("fail to write murmur hash: %v", err)
 	}
-	//
+	// member 需要的 hash函数
 	sum := db.setIndex.murhash.EncodeSum128()
 	db.setIndex.murhash.Reset()
 
@@ -131,7 +131,7 @@ func (db *RoseDB) buildSetsIndex(ent *logfile.LogEntry, pos *valuePos) {
 	if ent.ExpiredAt != 0 {
 		idxNode.expiredAt = ent.ExpiredAt
 	}
-	// 此时的索引树 是
+	// 此时的索引树的 key 是 hash(member)
 	idxTree.Put(sum, idxNode)
 }
 

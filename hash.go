@@ -46,7 +46,7 @@ func (db *RoseDB) HSet(key []byte, args ...[]byte) error {
 		ent := &logfile.LogEntry{Key: field, Value: value}
 		_, size := logfile.EncodeEntry(entry)
 		valuePos.entrySize = size
-		// 内存中的是 field
+		// 内存中的 key 是 field
 		err = db.updateIndexTree(idxTree, ent, valuePos, true, Hash)
 		if err != nil {
 			return err

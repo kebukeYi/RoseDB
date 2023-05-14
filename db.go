@@ -493,15 +493,16 @@ func (db *RoseDB) initDiscard() error {
 	return nil
 }
 
+// 编码
 func (db *RoseDB) encodeKey(key, subKey []byte) []byte {
-	header := make([]byte, encodeHeaderSize)
+	header := make([]byte, encodeHeaderSize) //10字节
 	var index int
-	index += binary.PutVarint(header[index:], int64(len(key)))
-	index += binary.PutVarint(header[index:], int64(len(subKey)))
+	index += binary.PutVarint(header[index:], int64(len(key)))    // keySize
+	index += binary.PutVarint(header[index:], int64(len(subKey))) // subKeySize
 	length := len(key) + len(subKey)
 	if length > 0 {
 		buf := make([]byte, length+index)
-		copy(buf[:index], header[:index])
+		copy(buf[:index], header[:index]) // keySize + subKeySize
 		copy(buf[index:index+len(key)], key)
 		copy(buf[index+len(key):], subKey)
 		return buf
@@ -509,11 +510,12 @@ func (db *RoseDB) encodeKey(key, subKey []byte) []byte {
 	return header[:index]
 }
 
+// 解码
 func (db *RoseDB) decodeKey(key []byte) ([]byte, []byte) {
 	var index int
-	keySize, i := binary.Varint(key[index:])
+	keySize, i := binary.Varint(key[index:]) // keySize
 	index += i
-	_, i = binary.Varint(key[index:])
+	_, i = binary.Varint(key[index:]) // subKeySize
 	index += i
 	sep := index + int(keySize)
 	return key[index:sep], key[sep:]
@@ -550,7 +552,7 @@ func (db *RoseDB) handleLogFileGC() {
 	// 周期器
 	ticker := time.NewTicker(db.opts.LogFileGCInterval)
 
-	defer ticker.Stop()
+	defer ticker.Stop() // 注意周期器的关闭
 	for {
 		select {
 		// 周期性唤醒
@@ -569,7 +571,7 @@ func (db *RoseDB) handleLogFileGC() {
 					}
 				}(dType)
 			}
-		// 这是啥？？？
+		// 收到进程的关闭信息
 		case <-quitSig:
 			return
 		}
@@ -589,13 +591,14 @@ func (db *RoseDB) doRunGC(dataType DataType, specifiedFid int, gcRatio float64) 
 		}
 
 		node, _ := indexVal.(*indexNode)
+		// 将之前冗余率过大的 过期文件 中的 有效数据重新载入到新文件和内存中
 		if node != nil && node.fid == fid && node.offset == offset {
-			// rewrite entry
+			// rewrite entry 重新写入新文件中
 			valuePos, err := db.writeLogEntry(ent, String)
 			if err != nil {
 				return err
 			}
-			// update index
+			// update index 重新写入内存中
 			if err = db.updateIndexTree(db.strIndex.idxTree, ent, valuePos, false, String); err != nil {
 				return err
 			}
@@ -606,8 +609,8 @@ func (db *RoseDB) doRunGC(dataType DataType, specifiedFid int, gcRatio float64) 
 	maybeRewriteList := func(fid uint32, offset int64, ent *logfile.LogEntry) error {
 		db.listIndex.mu.Lock()
 		defer db.listIndex.mu.Unlock()
-		var listKey = ent.Key
-		if ent.Type != logfile.TypeListMeta {
+		var listKey = ent.Key                 // 原生key || 包装key
+		if ent.Type != logfile.TypeListMeta { // 不是元数据类型的，那么key就是 包装key
 			listKey, _ = db.decodeListKey(ent.Key)
 		}
 		if db.listIndex.trees[string(listKey)] == nil {
@@ -635,7 +638,7 @@ func (db *RoseDB) doRunGC(dataType DataType, specifiedFid int, gcRatio float64) 
 	maybeRewriteHash := func(fid uint32, offset int64, ent *logfile.LogEntry) error {
 		db.hashIndex.mu.Lock()
 		defer db.hashIndex.mu.Unlock()
-		key, field := db.decodeKey(ent.Key)
+		key, field := db.decodeKey(ent.Key) // 解码 包装key
 		if db.hashIndex.trees[string(key)] == nil {
 			return nil
 		}
@@ -732,15 +735,16 @@ func (db *RoseDB) doRunGC(dataType DataType, specifiedFid int, gcRatio float64) 
 		return nil
 	}
 
+	// 依次 获得 str list set hash zset 数据类型文件的 活跃文件
 	activeLogFile := db.getActiveLogFile(dataType)
 	if activeLogFile == nil {
 		return nil
 	}
-	// 保存无效数据文件 的 刷盘
+	// 保存无效数据冗余率的文件进行刷盘
 	if err := db.discards[dataType].sync(); err != nil {
 		return err
 	}
-	// 从 discards[dataType] 获得 符合 被丢弃文件占比的文件
+	// 从 discards[dataType] 获得对应类型下的所有不活跃数据文件中 符合 被丢弃文件占比的文件
 	ccl, err := db.discards[dataType].getCCL(activeLogFile.Fid, gcRatio)
 	if err != nil {
 		return err
